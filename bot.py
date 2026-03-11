@@ -139,7 +139,6 @@ session = HTTP(
     testnet=False,
     api_key=BYBIT_KEY,
     api_secret=BYBIT_SECRET,
-    base_url="https://api.bytick.com",
 )
 
 def retry(fn, retries=3):
