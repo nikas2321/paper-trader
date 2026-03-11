@@ -47,7 +47,10 @@ BYBIT_KEY    = os.getenv("BYBIT_API_KEY", "")
 BYBIT_SECRET = os.getenv("BYBIT_API_SECRET", "")
 
 # Telegram
-TG_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
+# Telegram — токен собирается из двух частей чтобы обойти баг Railway
+_TG_ID    = os.getenv("TG_BOT_ID", "")
+_TG_HASH  = os.getenv("TG_BOT_HASH", "")
+TG_TOKEN  = f"{_TG_ID}:{_TG_HASH}" if _TG_ID and _TG_HASH else ""
 TG_CHAT   = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # ══════════════════════════════════════════════════════════
