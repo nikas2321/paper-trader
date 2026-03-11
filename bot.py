@@ -47,8 +47,8 @@ BYBIT_KEY    = os.getenv("BYBIT_API_KEY", "")
 BYBIT_SECRET = os.getenv("BYBIT_API_SECRET", "")
 
 # Telegram
-TG_TOKEN  = os.getenv("TG_TOKEN", "")
-TG_CHAT   = os.getenv("TG_CHAT_ID", "")
+TG_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TG_CHAT   = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # ══════════════════════════════════════════════════════════
 #  ЛОГИРОВАНИЕ
@@ -136,6 +136,7 @@ session = HTTP(
     testnet=False,
     api_key=BYBIT_KEY,
     api_secret=BYBIT_SECRET,
+    base_url="https://api.bytick.com",
 )
 
 def retry(fn, retries=3):
