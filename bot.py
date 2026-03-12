@@ -11,6 +11,7 @@ import math
 import json
 import time
 import logging
+import math
 import requests
 from datetime import datetime
 from dotenv import load_dotenv
@@ -169,7 +170,7 @@ def get_price(symbol: str) -> float:
         raise ValueError(f"Не удалось получить цену для {symbol}")
     return float(r["result"]["list"][0]["lastPrice"])
 
-def get_klines(symbol: str, limit=150) -> pd.DataFrame:
+def get_klines(symbol: str, limit=400) -> pd.DataFrame:
     r = retry(lambda: session.get_kline(
         category="spot", symbol=symbol, interval="1", limit=limit
     ))
@@ -184,6 +185,9 @@ def get_klines(symbol: str, limit=150) -> pd.DataFrame:
 
 def get_tickers() -> dict:
     r = retry(lambda: session.get_tickers(category="spot"))
+    if not r or "result" not in r or "list" not in r.get("result", {}):
+        log.warning("get_tickers вернул пустой/ошибочный ответ")
+        return {}
     return {t["symbol"]: t for t in r["result"]["list"] if t["symbol"] in PAIRS}
 
 # ══════════════════════════════════════════════════════════
@@ -200,9 +204,21 @@ def indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def buy_signal(df: pd.DataFrame) -> bool:
-    c, p = df.iloc[-1], df.iloc[-2]
-    cross = p.ema9 < p.ema21 and c.ema9 > c.ema21
-    return cross and c.rsi < 65 and c.adx > 20 and c.volume > c.vol_avg * 1.3
+    if len(df) < 40:  # минимум для осмысленных индикаторов
+        return False
+
+    for i in range(1, 4):  # проверяем кросс на последних 3 свечах
+        c = df.iloc[-i]
+        p = df.iloc[-i - 1]
+
+        if pd.isna(c.ema9) or pd.isna(c.ema21) or pd.isna(c.rsi) or pd.isna(c.adx) or pd.isna(c.vol_avg):
+            continue
+
+        cross = p.ema9 < p.ema21 and c.ema9 > c.ema21
+        if cross and c.rsi < 65 and c.adx > 20 and c.volume > c.vol_avg * 1.3:
+            return True
+
+    return False
 
 # ══════════════════════════════════════════════════════════
 #  СКАНЕР
@@ -221,18 +237,26 @@ def select_pair() -> str:
     for sym in PAIRS:
         try:
             df      = indicators(get_klines(sym))
-            vol24   = df["volume"].sum()  # берём все доступные свечи (limit=150)
+            if df.empty or len(df) < 40:
+                log.debug(f"{sym}: пустой или короткий df, пропускаем")
+                continue
+            vol24   = df["volume"].sum()  # берём все доступные свечи (limit=400)
             volat   = df["close"].pct_change().std()
-            adx_val = df["adx"].iloc[-1]
+            adx_val = df["adx"].iloc[-1] if not pd.isna(df["adx"].iloc[-1]) else 0
             scores[sym] = (vol24 ** 0.5) * volat * adx_val  # sqrt для баланса
-            time.sleep(0.2)
+            time.sleep(0.08)  # ускорили скан: ~4 сек вместо 10
         except Exception as e:
             log.debug(f"{sym}: {e}")
 
-    best = max(scores, key=scores.get)
+    if not scores:
+        log.warning("Нет доступных пар → fallback на BTCUSDT")
+        best = "BTCUSDT"
+    else:
+        best = max(scores, key=scores.get)
+
     _scan_cache["time"]   = time.time()
     _scan_cache["symbol"] = best
-    log.info(f"Лучшая пара: {best} (скор={scores[best]:.1f})")
+    log.info(f"Лучшая пара: {best} (скор={scores.get(best, 0):.1f})")
     return best
 
 # ══════════════════════════════════════════════════════════
@@ -244,7 +268,7 @@ def round_qty(qty: float, price: float) -> float:
     if price > 1000:   return round(qty, 5)
     if price > 10:     return round(qty, 3)
     if price > 1:      return round(qty, 2)
-    if price > 0.01:   return round(qty, 0)
+    if price > 0.01:   return round(qty, 2)   # было 0 → стало 2
     return round(qty, 0)  # для PEPE/SHIB/BONK — целое число монет
 
 def smart_round_price(val: float) -> float:
@@ -252,7 +276,6 @@ def smart_round_price(val: float) -> float:
     if val == 0:
         return 0.0
     # Определяем сколько значимых знаков нужно
-    import math
     magnitude = math.floor(math.log10(abs(val)))
     decimal_places = max(2, -magnitude + 5)
     return round(val, decimal_places)
