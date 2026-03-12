@@ -29,7 +29,7 @@ PAIRS = [
     "BTCUSDT","ETHUSDT","BNBUSDT","XRPUSDT","TRXUSDT",
     "DOGEUSDT","ADAUSDT","AVAXUSDT","LTCUSDT","BCHUSDT",
     # Топ 11-20
-    "HYPEUSDT","XLMUSDT","XMRUSDT","LINKUSDT","SHIBUSDT",
+    "HYPEUSDT","XLMUSDT","KASUSDT","LINKUSDT","SHIBUSDT",
     "TONUSDT","DOTUSDT","UNIUSDT","MNTUSDT","TAOUSDT",
     # Топ 21-30
     "SUIUSDT","HBARUSDT","NEARUSDT","AAVEUSDT","ICPUSDT",
@@ -39,7 +39,7 @@ PAIRS = [
     "BONKUSDT","ENAUSDT","FILUSDT","VETUSDT","STXUSDT",
     # Топ 41-50
     "SEIUSDT","CRVUSDT","INJUSDT","FTMUSDT","WIFUSDT",
-    "TRUMPUSDT","OPUSDT","VIRTUALUSDT","FETUSDT","CAFEUSDT",
+    "TRUMPUSDT","OPUSDT","VIRTUALUSDT","FETUSDT","ZROUSDT",
 ]
 
 INITIAL_BALANCE = 2000.0   # виртуальный стартовый баланс
@@ -247,6 +247,15 @@ def open_virtual_position(state: dict, symbol: str, price: float) -> dict:
     qty   = round_qty(usdt / price, price)
     tp    = round(price * (1 + TP_PCT), 6)
     sl    = round(price * (1 - SL_PCT), 6)
+
+    # Для очень маленьких цен (PEPE, SHIB и т.д.) не округляем
+    def smart_round(val):
+        if val < 0.0001:
+            return float(f"{val:.10f}".rstrip('0'))
+        return round(val, 6)
+
+    tp = smart_round(price * (1 + TP_PCT))
+    sl = smart_round(price * (1 - SL_PCT))
 
     position = {
         "symbol":     symbol,
