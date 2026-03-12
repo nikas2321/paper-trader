@@ -25,8 +25,24 @@ load_dotenv()
 # ══════════════════════════════════════════════════════════
 
 PAIRS = [
-    "BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT",
-    "ADAUSDT","AVAXUSDT","DOGEUSDT","DOTUSDT","MATICUSDT",
+    # Топ по капитализации
+    "BTCUSDT","ETHUSDT","BNBUSDT","XRPUSDT","ADAUSDT",
+    "DOGEUSDT","AVAXUSDT","DOTUSDT","MATICUSDT","LTCUSDT",
+    # DeFi
+    "UNIUSDT","LINKUSDT","AAVEUSDT","MKRUSDT","CRVUSDT",
+    # L1/L2
+    "NEARUSDT","ATOMUSDT","ALGOUSDT","FTMUSDT","EGLDUSDT",
+    # Мемкоины и трендовые
+    "PEPEUSDT","SHIBUSDT","FLOKIUSDT","BONKUSDT","WIFUSDT",
+    # Инфраструктура
+    "TRXUSDT","XLMUSDT","VETUSDT","ICPUSDT","FILUSDT",
+    # Новые топы
+    "SUIUSDT","TONUSDT","ARBUSDT","OPUSDT","INJUSDT",
+    # Торговые
+    "APTUSDT","STXUSDT","RUNEUSDT","TIAUSDT","SEIUSDT",
+    # Дополнительно
+    "LDOUSDT","GRTUSDT","SANDUSDT","MANAUSDT","APEUSDT",
+    "GALAUSDT","AXSUSDT","IMXUSDT","BLURUSDT","ENAUSDT",
 ]
 
 INITIAL_BALANCE = 2000.0   # виртуальный стартовый баланс
