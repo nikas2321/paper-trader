@@ -25,24 +25,21 @@ load_dotenv()
 # ══════════════════════════════════════════════════════════
 
 PAIRS = [
-    # Топ по капитализации
-    "BTCUSDT","ETHUSDT","BNBUSDT","XRPUSDT","ADAUSDT",
-    "DOGEUSDT","AVAXUSDT","DOTUSDT","MATICUSDT","LTCUSDT",
-    # DeFi
-    "UNIUSDT","LINKUSDT","AAVEUSDT","MKRUSDT","CRVUSDT",
-    # L1/L2
-    "NEARUSDT","ATOMUSDT","ALGOUSDT","FTMUSDT","EGLDUSDT",
-    # Мемкоины и трендовые
-    "PEPEUSDT","SHIBUSDT","FLOKIUSDT","BONKUSDT","WIFUSDT",
-    # Инфраструктура
-    "TRXUSDT","XLMUSDT","VETUSDT","ICPUSDT","FILUSDT",
-    # Новые топы
-    "SUIUSDT","TONUSDT","ARBUSDT","OPUSDT","INJUSDT",
-    # Торговые
-    "APTUSDT","STXUSDT","RUNEUSDT","TIAUSDT","SEIUSDT",
-    # Дополнительно
-    "LDOUSDT","GRTUSDT","SANDUSDT","MANAUSDT","APEUSDT",
-    "GALAUSDT","AXSUSDT","IMXUSDT","BLURUSDT","ENAUSDT",
+    # Топ-10 по капитализации (без стейблов)
+    "BTCUSDT","ETHUSDT","BNBUSDT","XRPUSDT","TRXUSDT",
+    "DOGEUSDT","ADAUSDT","AVAXUSDT","LTCUSDT","BCHUSDT",
+    # Топ 11-20
+    "HYPEUSDT","XLMUSDT","XMRUSDT","LINKUSDT","SHIBUSDT",
+    "TONUSDT","DOTUSDT","UNIUSDT","MNTUSDT","TAOUSDT",
+    # Топ 21-30
+    "SUIUSDT","HBARUSDT","NEARUSDT","AAVEUSDT","ICPUSDT",
+    "ATOMUSDT","WLDUSDT","RENDERUSDT","ALGOUSDT","APTUSDT",
+    # Топ 31-40
+    "PEPEUSDT","ETCUSDT","ONDOUSDT","ARBUSDT","JUPUSDT",
+    "BONKUSDT","ENAUSDT","FILUSDT","VETUSDT","STXUSDT",
+    # Топ 41-50
+    "SEIUSDT","CRVUSDT","INJUSDT","FTMUSDT","WIFUSDT",
+    "TRUMPUSDT","OPUSDT","VIRTUALUSDT","FETUSDT","CAFEUSDT",
 ]
 
 INITIAL_BALANCE = 2000.0   # виртуальный стартовый баланс
@@ -353,7 +350,7 @@ def main():
         f"🚀 <b>Paper Trader запущен</b>\n"
         f"Виртуальный баланс: ${state['balance']:.2f}\n"
         f"Стратегия: EMA 9/21 + RSI + ADX\n"
-        f"Пары: топ-10 Bybit спот\n"
+        f"Пары: топ-50 Bybit спот\n"
         f"TP: +1.5% | SL: -0.8% | Риск: 10%/сделка"
     )
 
