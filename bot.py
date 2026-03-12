@@ -43,14 +43,14 @@ PAIRS = [
 ]
 
 INITIAL_BALANCE = 2000.0   # виртуальный стартовый баланс
-RISK_PCT        = 0.10     # 10% на сделку
-TP_PCT          = 0.015    # тейк-профит +1.5%
-SL_PCT          = 0.008    # стоп-лосс -0.8%
+RISK_PCT        = 0.03     # 3% на сделку
+TP_PCT          = 0.025    # тейк-профит +2.5%
+SL_PCT          = 0.015    # стоп-лосс -1.5%
 COMMISSION      = 0.001    # комиссия 0.1%
 DAILY_STOP      = 0.05     # стоп при -5% за день
 MAX_TRADES_DAY  = 15
 LOSS_COOLDOWN   = 180      # сек после убытка
-SCAN_INTERVAL   = 900      # сек между сканами
+SCAN_INTERVAL   = 120      # сек между сканами (2 мин)
 LOOP_SEC        = 30
 
 STATE_FILE = "paper_state.json"
@@ -221,10 +221,10 @@ def select_pair() -> str:
     for sym in PAIRS:
         try:
             df      = indicators(get_klines(sym))
-            vol24   = df["volume"].tail(1440).sum()
+            vol24   = df["volume"].sum()  # берём все доступные свечи (limit=150)
             volat   = df["close"].pct_change().std()
             adx_val = df["adx"].iloc[-1]
-            scores[sym] = vol24 * volat * adx_val
+            scores[sym] = (vol24 ** 0.5) * volat * adx_val  # sqrt для баланса
             time.sleep(0.2)
         except Exception as e:
             log.debug(f"{sym}: {e}")
@@ -273,6 +273,11 @@ def open_virtual_position(state: dict, symbol: str, price: float) -> dict:
         "opened_at":  datetime.utcnow().isoformat(),
     }
 
+    if qty <= 0:
+        log.warning(f"qty = 0 для {symbol} @ {price}, пропускаем")
+        tg(f"⚠️ Пропущена сделка {symbol}: qty = 0 при цене {price}")
+        return state
+
     state["position"] = position
     save_state(state)
 
@@ -281,8 +286,8 @@ def open_virtual_position(state: dict, symbol: str, price: float) -> dict:
         f"Пара: {symbol}\n"
         f"Цена входа: {price}\n"
         f"Объём: ${usdt:.2f}\n"
-        f"TP: {tp} (+1.5%)\n"
-        f"SL: {sl} (-0.8%)\n"
+        f"TP: {tp} (+2.5%)\n"
+        f"SL: {sl} (-1.5%)\n"
         f"Баланс: ${state['balance']:.2f}"
     )
     log.info(msg.replace("\n", " | ").replace("<b>","").replace("</b>",""))
@@ -300,16 +305,18 @@ def check_position(state: dict, last_loss_time: float) -> tuple[dict, float]:
     sl_hit = price <= pos["sl"]
 
     if not tp_hit and not sl_hit:
+        tp_dist = (pos["tp"] - price) / price * 100
+        sl_dist = (price - pos["sl"]) / price * 100
         log.info(
-            f"📌 [{pos['symbol']}] Держим @ {price:.4f} | "
-            f"вход={pos['entry']} TP={pos['tp']} SL={pos['sl']}"
+            f"📌 [{pos['symbol']}] Держим @ {price:.6g} | "
+            f"до TP: {tp_dist:.2f}% | до SL: {sl_dist:.2f}%"
         )
         return state, last_loss_time
 
     # Закрываем
     exit_price = pos["tp"] if tp_hit else pos["sl"]
     pnl_gross  = (exit_price - pos["entry"]) * pos["qty"]
-    commission = pos["usdt"] * COMMISSION * 2  # открытие + закрытие
+    commission = (pos["usdt"] + abs(pnl_gross)) * COMMISSION  # обе стороны
     pnl_net    = round(pnl_gross - commission, 4)
     win        = pnl_net > 0
 
@@ -366,7 +373,7 @@ def main():
         f"Виртуальный баланс: ${state['balance']:.2f}\n"
         f"Стратегия: EMA 9/21 + RSI + ADX\n"
         f"Пары: топ-50 Bybit спот\n"
-        f"TP: +1.5% | SL: -0.8% | Риск: 10%/сделка"
+        f"TP: +2.5% | SL: -1.5% | Риск: 3%/сделка"
     )
 
     last_loss_time = 0.0
