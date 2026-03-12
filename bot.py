@@ -165,12 +165,16 @@ def retry(fn, retries=3):
 
 def get_price(symbol: str) -> float:
     r = retry(lambda: session.get_tickers(category="spot", symbol=symbol))
+    if r is None:
+        raise ValueError(f"Не удалось получить цену для {symbol}")
     return float(r["result"]["list"][0]["lastPrice"])
 
 def get_klines(symbol: str, limit=150) -> pd.DataFrame:
     r = retry(lambda: session.get_kline(
         category="spot", symbol=symbol, interval="1", limit=limit
     ))
+    if r is None:
+        raise ValueError(f"Не удалось получить свечи для {symbol}")
     df = pd.DataFrame(r["result"]["list"],
                       columns=["ts","open","high","low","close","volume","turnover"])
     df = df.iloc[::-1]
@@ -237,25 +241,27 @@ def select_pair() -> str:
 
 def round_qty(qty: float, price: float) -> float:
     """Округляем qty под реальные минимумы биржи."""
-    if price > 1000: return round(qty, 5)
-    if price > 10:   return round(qty, 3)
-    if price > 1:    return round(qty, 2)
-    return round(qty, 0)
+    if price > 1000:   return round(qty, 5)
+    if price > 10:     return round(qty, 3)
+    if price > 1:      return round(qty, 2)
+    if price > 0.01:   return round(qty, 0)
+    return round(qty, 0)  # для PEPE/SHIB/BONK — целое число монет
+
+def smart_round_price(val: float) -> float:
+    """Правильное округление цены для любых монет включая PEPE/SHIB."""
+    if val == 0:
+        return 0.0
+    # Определяем сколько значимых знаков нужно
+    import math
+    magnitude = math.floor(math.log10(abs(val)))
+    decimal_places = max(2, -magnitude + 5)
+    return round(val, decimal_places)
 
 def open_virtual_position(state: dict, symbol: str, price: float) -> dict:
     usdt  = state["balance"] * RISK_PCT
     qty   = round_qty(usdt / price, price)
-    tp    = round(price * (1 + TP_PCT), 6)
-    sl    = round(price * (1 - SL_PCT), 6)
-
-    # Для очень маленьких цен (PEPE, SHIB и т.д.) не округляем
-    def smart_round(val):
-        if val < 0.0001:
-            return float(f"{val:.10f}".rstrip('0'))
-        return round(val, 6)
-
-    tp = smart_round(price * (1 + TP_PCT))
-    sl = smart_round(price * (1 - SL_PCT))
+    tp = smart_round_price(price * (1 + TP_PCT))
+    sl = smart_round_price(price * (1 - SL_PCT))
 
     position = {
         "symbol":     symbol,
