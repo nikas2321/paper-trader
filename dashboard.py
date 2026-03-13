@@ -5,6 +5,7 @@
 
 import json
 import os
+import fcntl
 from datetime import datetime
 from flask import Flask, jsonify
 from flask_cors import CORS
@@ -17,7 +18,13 @@ STATE_FILE = "paper_state.json"
 def load_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE) as f:
-            return json.load(f)
+            fcntl.flock(f, fcntl.LOCK_SH)
+            try:
+                return json.load(f)
+            except Exception:
+                return {}
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
     return {}
 
 @app.route("/")
@@ -78,25 +85,27 @@ def dashboard():
 
 <script>
 async function load(){
+  document.getElementById('refresh-time').textContent='Обновление...';
+  document.getElementById('refresh-time').style.color='#2a4a3a';
   try{
     const r=await fetch('/api/state');
     const d=await r.json();
     render(d);
     document.getElementById('refresh-time').textContent='Обновлено: '+new Date().toLocaleTimeString('ru');
+    document.getElementById('refresh-time').style.color='#2a6a3a';
   }catch(e){
-    document.getElementById('app').innerHTML='<div style="color:#ff3355;padding:20px">Ошибка загрузки данных</div>';
+    console.error("Ошибка загрузки состояния:", e);
+    document.getElementById('app').innerHTML=`<div style="color:#ff3355;padding:20px">Ошибка загрузки данных<br>${e.message}</div>`;
   }
 }
 
 function fmt(v){
-  if(v===undefined||v===null||v===0) return '–';
-  if(Math.abs(v)>1000) return v.toLocaleString('ru',{minimumFractionDigits:2,maximumFractionDigits:2});
-  if(Math.abs(v)>1) return v.toFixed(3);
-  if(Math.abs(v)>0.01) return v.toFixed(4);
-  // Для мемкоинов (PEPE, SHIB, BONK) — умное форматирование
-  const magnitude = Math.floor(Math.log10(Math.abs(v)));
-  const decimals = Math.max(4, -magnitude + 4);
-  return v.toFixed(decimals);
+  if(!v && v!==0) return '–';
+  if(Math.abs(v)>=1000) return v.toLocaleString('ru',{minimumFractionDigits:2,maximumFractionDigits:2});
+  if(Math.abs(v)>=1)    return v.toFixed(3);
+  if(Math.abs(v)>=0.1)  return v.toFixed(4);
+  if(Math.abs(v)>=0.0001) return v.toFixed(6);
+  return v.toFixed(10);  // PEPE, SHIB, BONK
 }
 
 function render(d){
@@ -146,19 +155,43 @@ function render(d){
 
   // Active position
   if(pos){
-    const curr_pnl=((pos.tp-pos.entry)*pos.qty).toFixed(4);
+    const curPrice = pos.current_price || d.current_price || pos.entry;
+    const direction = pos.direction || "LONG";
+    let priceDiff = curPrice - pos.entry;
+    if(direction === "SHORT") priceDiff = -priceDiff;
+
+    const unrealGross = priceDiff * pos.qty;
+    const commissionEst = ((pos.usdt||0) + unrealGross) * 0.001;  // только выход
+    const unrealNet = unrealGross - commissionEst;
+    const unrealPct = (priceDiff / pos.entry * 100).toFixed(2);
+    const unrealColor = unrealNet >= 0 ? '#00ff88' : '#ff3355';
+
+    const toTp = direction === "LONG"
+      ? ((pos.tp - curPrice) / curPrice * 100).toFixed(1)
+      : ((curPrice - pos.tp) / curPrice * 100).toFixed(1);
+    const toSl = direction === "LONG"
+      ? ((curPrice - pos.sl) / curPrice * 100).toFixed(1)
+      : ((pos.sl - curPrice) / curPrice * 100).toFixed(1);
+
     html+=`<div class="pos-card">
       <div style="display:flex;justify-content:space-between;align-items:center">
-        <div><span class="dot" style="background:#00ff88"></span><span style="color:#c0f0d0;font-weight:700;font-size:13px">${pos.symbol}</span></div>
+        <div><span class="dot" style="background:#00ff88"></span><span style="color:#c0f0d0;font-weight:700;font-size:13px">${pos.symbol} (${direction})</span></div>
         <span class="badge win">ОТКРЫТА</span>
       </div>
       <div class="pos-grid">
-        <div class="pos-item"><div class="pos-item-label">ЦЕНА ВХОДА</div><div class="pos-item-value" style="color:#f0c040">${fmt(pos.entry)}</div></div>
-        <div class="pos-item"><div class="pos-item-label">ОБЪЁМ</div><div class="pos-item-value">$${pos.usdt?.toFixed(0)||0}</div></div>
-        <div class="pos-item"><div class="pos-item-label">ТЕЙК-ПРОФИТ</div><div class="pos-item-value" style="color:#00ff88">${fmt(pos.tp)}</div></div>
-        <div class="pos-item"><div class="pos-item-label">СТОП-ЛОСС</div><div class="pos-item-value" style="color:#ff3355">${fmt(pos.sl)}</div></div>
+        <div class="pos-item"><div class="pos-item-label">ВХОД</div><div class="pos-item-value" style="color:#f0c040">${fmt(pos.entry)}</div></div>
+        <div class="pos-item"><div class="pos-item-label">ТЕКУЩАЯ</div><div class="pos-item-value" style="color:#c0f0d0">${fmt(curPrice)}</div></div>
+        <div class="pos-item"><div class="pos-item-label">TP</div><div class="pos-item-value" style="color:#00ff88">${fmt(pos.tp)} <small style="color:#2a6a3a">(ещё +${toTp}%)</small></div></div>
+        <div class="pos-item"><div class="pos-item-label">SL</div><div class="pos-item-value" style="color:#ff3355">${fmt(pos.sl)} <small style="color:#4a1a2a">(-${toSl}% до)</small></div></div>
       </div>
-      <div style="font-size:8px;color:#2a4a3a;margin-top:8px">Открыта: ${pos.opened_at||'–'}</div>
+      <div style="margin:10px 0;padding:10px;background:#050a07;border-radius:6px;display:flex;justify-content:space-between;align-items:center;border:1px solid ${unrealColor}40">
+        <span style="font-size:9px;color:#2a4a3a;letter-spacing:1px">НЕРЕАЛИЗ. PnL</span>
+        <span style="font-size:17px;font-weight:700;color:${unrealColor}">${unrealNet>=0?'+':''}${unrealNet.toFixed(2)}$ (${unrealPct>=0?'+':''}${unrealPct}%)</span>
+      </div>
+      <div style="font-size:8px;color:#2a4a3a;margin-top:4px">
+        Открыта: ${pos.opened_at?.slice(0,19).replace('T',' ')||'–'} | Объём: $${(pos.usdt||0).toFixed(0)}
+        <br>Цена обновлена: ${new Date().toLocaleTimeString('ru')}
+      </div>
     </div>`;
   }
 
@@ -166,6 +199,9 @@ function render(d){
   if(log.length>1){
     let running=start;
     const points=[start,...log.map(t=>{running+=t.pnl;return running;})].slice(-20);
+    // Всегда добавляем текущий баланс с учётом открытой позиции
+    const currentBal = bal + (d.position?.unreal_pnl || 0);
+    points.push(currentBal);
     const minV=Math.min(...points), maxV=Math.max(...points)||start+1;
     html+=`<div class="section"><div class="section-title">ДИНАМИКА БАЛАНСА</div>
       <div class="pnl-chart">
