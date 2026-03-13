@@ -89,10 +89,14 @@ async function load(){
 }
 
 function fmt(v){
-  if(v===undefined||v===null) return '–';
+  if(v===undefined||v===null||v===0) return '–';
   if(Math.abs(v)>1000) return v.toLocaleString('ru',{minimumFractionDigits:2,maximumFractionDigits:2});
   if(Math.abs(v)>1) return v.toFixed(3);
-  return v.toFixed(4);
+  if(Math.abs(v)>0.01) return v.toFixed(4);
+  // Для мемкоинов (PEPE, SHIB, BONK) — умное форматирование
+  const magnitude = Math.floor(Math.log10(Math.abs(v)));
+  const decimals = Math.max(4, -magnitude + 4);
+  return v.toFixed(decimals);
 }
 
 function render(d){
