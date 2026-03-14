@@ -335,10 +335,6 @@ def check_position(state: dict, last_loss_time: float) -> tuple[dict, float]:
         if now - state.get("last_log", 0) > 300:
             state["last_log"] = now
             log.info(f"📌 [{pos['symbol']}] Держим @ {price:.8g} | TP: {tp_dist:.2f}% | SL: {sl_dist:.2f}%")
-        # Telegram не чаще раза в 5 минут
-        if now - state.get("last_notify", 0) > 300:
-            state["last_notify"] = now
-            tg(f"📌 <b>{pos['symbol']}</b> держим\nдо TP: {tp_dist:.2f}% | до SL: {sl_dist:.2f}%")
         # Сохраняем цену раз в 60 сек
         if now - state.get("last_price_save", 0) > 60:
             state["last_price_save"] = now
