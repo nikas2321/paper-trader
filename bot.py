@@ -26,27 +26,24 @@ load_dotenv()
 # ══════════════════════════════════════════════════════════
 
 PAIRS = [
-    # Топ-10 по капитализации (без стейблов)
-    "BTCUSDT","ETHUSDT","BNBUSDT","XRPUSDT","TRXUSDT",
-    "DOGEUSDT","ADAUSDT","AVAXUSDT","LTCUSDT","BCHUSDT",
-    # Топ 11-20
-    "HYPEUSDT","XLMUSDT","KASUSDT","LINKUSDT","SHIBUSDT",
-    "TONUSDT","DOTUSDT","UNIUSDT","MNTUSDT","TAOUSDT",
-    # Топ 21-30
-    "SUIUSDT","HBARUSDT","NEARUSDT","AAVEUSDT","ICPUSDT",
-    "ATOMUSDT","WLDUSDT","RENDERUSDT","ALGOUSDT","APTUSDT",
-    # Топ 31-40
-    "PEPEUSDT","ETCUSDT","ONDOUSDT","ARBUSDT","JUPUSDT",
-    "BONKUSDT","ENAUSDT","FILUSDT","VETUSDT","STXUSDT",
-    # Топ 41-50
-    "SEIUSDT","CRVUSDT","INJUSDT","FTMUSDT","WIFUSDT",
-    "TRUMPUSDT","OPUSDT","VIRTUALUSDT","FETUSDT","ZROUSDT",
+    # Топ по капитализации
+    "BTCUSDT","ETHUSDT","BNBUSDT","XRPUSDT","ADAUSDT",
+    "AVAXUSDT","LTCUSDT","BCHUSDT","DOTUSDT","LINKUSDT",
+    # L1/L2 сети
+    "SOLUSDT","TONUSDT","SUIUSDT","APTUSDT","ARBUSDT",
+    "OPUSDT","NEARUSDT","ATOMUSDT","ICPUSDT","XLMUSDT",
+    # DeFi
+    "UNIUSDT","AAVEUSDT","MKRUSDT","CRVUSDT","LDOUSDT",
+    "INJUSDT","STXUSDT","FILUSDT","ALGOUSDT","VETUSDT",
+    # Инфраструктура / AI
+    "RENDERUSDT","FETUSDT","TAOUSDT","HBARUSDT","TRXUSDT",
+    "ETCUSDT","XMRUSDT","QNTUSDT","ZROUSDT","ENAUSDT",
 ]
 
 INITIAL_BALANCE = 2000.0   # виртуальный стартовый баланс
 RISK_PCT        = 0.03     # 3% на сделку
-TP_PCT          = 0.025    # тейк-профит +2.5%
-SL_PCT          = 0.015    # стоп-лосс -1.5%
+TP_PCT          = 0.045    # тейк-профит +4.5%
+SL_PCT          = 0.025    # стоп-лосс -2.5%
 COMMISSION      = 0.001    # комиссия 0.1% за сторону (0.2% round-trip)
 DAILY_STOP      = 0.05     # стоп при -5% за день
 MAX_TRADES_DAY  = 15
@@ -176,7 +173,10 @@ def get_price(symbol: str) -> float:
     r = retry(lambda: session.get_tickers(category="spot", symbol=symbol))
     if r is None:
         raise ValueError(f"Не удалось получить цену для {symbol}")
-    return float(r["result"]["list"][0]["lastPrice"])
+    lst = r.get("result", {}).get("list", [])
+    if not lst:
+        raise ValueError(f"Пустой список цен для {symbol}")
+    return float(lst[0]["lastPrice"])
 
 def get_klines(symbol: str, limit=400) -> pd.DataFrame:
     r = retry(lambda: session.get_kline(
@@ -215,7 +215,7 @@ def buy_signal(df: pd.DataFrame) -> bool:
     if len(df) < 40:  # минимум для осмысленных индикаторов
         return False
 
-    for i in range(1, 4):  # проверяем кросс на последних 3 свечах
+    for i in range(1, 6):  # проверяем кросс на последних 5 свечах
         c = df.iloc[-i]
         p = df.iloc[-i - 1]
 
@@ -223,7 +223,7 @@ def buy_signal(df: pd.DataFrame) -> bool:
             continue
 
         cross = p.ema9 < p.ema21 and c.ema9 > c.ema21
-        if cross and c.rsi < 65 and c.adx > 20 and c.volume > c.vol_avg * 1.3:
+        if cross and 35 < c.rsi < 70 and c.adx > 18 and c.volume > c.vol_avg * 1.12:
             return True
 
     return False
@@ -232,40 +232,23 @@ def buy_signal(df: pd.DataFrame) -> bool:
 #  СКАНЕР
 # ══════════════════════════════════════════════════════════
 
-_scan_cache = {"time": 0, "symbol": None}
-
 def select_pair() -> str:
-    if time.time() - _scan_cache["time"] < SCAN_INTERVAL and _scan_cache["symbol"]:
-        return _scan_cache["symbol"]
-
+    """Сканирует ВСЕ пары и возвращает первую с сигналом BUY."""
     log.info("🔍 Сканирую рынок...")
-    tickers = get_tickers()
-    scores  = {}
-
     for sym in PAIRS:
         try:
-            df      = indicators(get_klines(sym))
+            df = indicators(get_klines(sym))
             if df.empty or len(df) < 40:
                 log.debug(f"{sym}: пустой или короткий df, пропускаем")
                 continue
-            vol24   = df["volume"].sum()  # берём все доступные свечи (limit=400)
-            volat   = df["close"].pct_change().std()
-            adx_val = df["adx"].iloc[-1] if not pd.isna(df["adx"].iloc[-1]) else 0
-            scores[sym] = (vol24 ** 0.5) * volat * adx_val  # sqrt для баланса
-            time.sleep(0.08)  # ускорили скан: ~4 сек вместо 10
+            if buy_signal(df):
+                log.info(f"✅ СИГНАЛ НАЙДЕН: {sym}")
+                return sym
+            time.sleep(0.08)
         except Exception as e:
             log.debug(f"{sym}: {e}")
-
-    if not scores:
-        log.warning("Нет доступных пар → fallback на BTCUSDT")
-        best = "BTCUSDT"
-    else:
-        best = max(scores, key=scores.get)
-
-    _scan_cache["time"]   = time.time()
-    _scan_cache["symbol"] = best
-    log.info(f"Лучшая пара: {best} (скор={scores.get(best, 0):.1f})")
-    return best
+    log.info("Сигналов нет на всех парах")
+    return None
 
 # ══════════════════════════════════════════════════════════
 #  ВИРТУАЛЬНАЯ ТОРГОВЛЯ
@@ -345,18 +328,22 @@ def check_position(state: dict, last_loss_time: float) -> tuple[dict, float]:
     sl_hit = price <= pos["sl"]
     # Сохраняем цену только если позиция не закрывается в этом цикле
     if not tp_hit and not sl_hit:
-        if time.time() - state.get("last_price_save", 0) > 60:
-            state["last_price_save"] = time.time()
+        now = time.time()
+        tp_dist = (pos["tp"] - price) / price * 100
+        sl_dist = (price - pos["sl"]) / price * 100
+        # Лог не чаще раза в 5 минут
+        if now - state.get("last_log", 0) > 300:
+            state["last_log"] = now
+            log.info(f"📌 [{pos['symbol']}] Держим @ {price:.8g} | TP: {tp_dist:.2f}% | SL: {sl_dist:.2f}%")
+        # Telegram не чаще раза в 5 минут
+        if now - state.get("last_notify", 0) > 300:
+            state["last_notify"] = now
+            tg(f"📌 <b>{pos['symbol']}</b> держим\nдо TP: {tp_dist:.2f}% | до SL: {sl_dist:.2f}%")
+        # Сохраняем цену раз в 60 сек
+        if now - state.get("last_price_save", 0) > 60:
+            state["last_price_save"] = now
             save_state(state)
-        return state, last_loss_time  # выходим раньше — не нужно идти дальше
-
-    # Позиция держится — логируем расстояния
-    tp_dist = (pos["tp"] - price) / price * 100
-    sl_dist = (price - pos["sl"]) / price * 100
-    log.info(
-        f"📌 [{pos['symbol']}] Держим @ {price:.6g} | "
-        f"до TP: {tp_dist:.2f}% | до SL: {sl_dist:.2f}%"
-    )
+        return state, last_loss_time
 
     # Закрываем
     exit_price = pos["tp"] if tp_hit else pos["sl"]
@@ -458,14 +445,15 @@ def main():
                 time.sleep(30)
                 continue
 
-            # Ищем сигнал
+            # Ищем сигнал на всех парах
             symbol = select_pair()
-            df     = indicators(get_klines(symbol))
+            if symbol is None:
+                time.sleep(LOOP_SEC)
+                continue
 
-            if buy_signal(df):
-                price = get_price(symbol)
-                log.info(f"✅ СИГНАЛ BUY: {symbol} @ {price}")
-                state = open_virtual_position(state, symbol, price)
+            price = get_price(symbol)
+            log.info(f"✅ СИГНАЛ BUY: {symbol} @ {price}")
+            state = open_virtual_position(state, symbol, price)
 
         except KeyboardInterrupt:
             log.info("Бот остановлен.")
