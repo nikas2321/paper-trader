@@ -26,43 +26,36 @@ load_dotenv()
 # ══════════════════════════════════════════════════════════
 
 PAIRS = [
-    # Топ по капитализации
     "BTCUSDT","ETHUSDT","BNBUSDT","XRPUSDT","ADAUSDT",
     "AVAXUSDT","LTCUSDT","BCHUSDT","DOTUSDT","LINKUSDT",
-    # L1/L2 сети
     "SOLUSDT","TONUSDT","SUIUSDT","APTUSDT","ARBUSDT",
     "OPUSDT","NEARUSDT","ATOMUSDT","ICPUSDT","XLMUSDT",
-    # DeFi
     "UNIUSDT","AAVEUSDT","MKRUSDT","CRVUSDT","LDOUSDT",
     "INJUSDT","STXUSDT","FILUSDT","ALGOUSDT","VETUSDT",
-    # Инфраструктура / AI
     "RENDERUSDT","FETUSDT","TAOUSDT","HBARUSDT","TRXUSDT",
     "ETCUSDT","XMRUSDT","QNTUSDT","ZROUSDT","ENAUSDT",
 ]
 
-INITIAL_BALANCE = 2000.0   # виртуальный стартовый баланс
+INITIAL_BALANCE = 2000.0
 RISK_PCT        = 0.03     # 3% на сделку
-TP_PCT          = 0.045    # тейк-профит +4.5%
-SL_PCT          = 0.025    # стоп-лосс -2.5%
-COMMISSION      = 0.001    # комиссия 0.1% за сторону (0.2% round-trip)
-DAILY_STOP      = 0.05     # стоп при -5% за день
-MAX_TRADES_DAY  = 15
-LOSS_COOLDOWN   = 180      # сек после убытка
-SCAN_INTERVAL   = 120      # сек между сканами (2 мин)
+TP_PCT          = 0.045    # +4.5%
+SL_PCT          = 0.025    # -2.5%
+COMMISSION      = 0.001    # 0.1% за сторону
+DAILY_STOP      = 0.05     # -5% дневной стоп
+MAX_TRADES_DAY  = 20       # максимум сделок в день
+MAX_POSITIONS   = 5        # максимум одновременных позиций
+LOSS_COOLDOWN   = 120      # сек после убытка
 LOOP_SEC        = 30
 
 STATE_FILE = "paper_state.json"
 
-# Bybit — только READ (цены, свечи). Ключи нужны для get_klines
 BYBIT_KEY    = os.getenv("BYBIT_API_KEY", "")
 BYBIT_SECRET = os.getenv("BYBIT_API_SECRET", "")
 
-# Telegram
-# Telegram — токен собирается из двух частей чтобы обойти баг Railway
-_TG_ID    = os.getenv("TG_BOT_ID", "")
-_TG_HASH  = os.getenv("TG_BOT_HASH", "")
-TG_TOKEN  = f"{_TG_ID}:{_TG_HASH}" if _TG_ID and _TG_HASH else ""
-TG_CHAT   = os.getenv("TELEGRAM_CHAT_ID", "")
+_TG_ID   = os.getenv("TG_BOT_ID", "")
+_TG_HASH = os.getenv("TG_BOT_HASH", "")
+TG_TOKEN = f"{_TG_ID}:{_TG_HASH}" if _TG_ID and _TG_HASH else ""
+TG_CHAT  = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # ══════════════════════════════════════════════════════════
 #  ЛОГИРОВАНИЕ
@@ -83,7 +76,6 @@ log = logging.getLogger("PaperTrader")
 # ══════════════════════════════════════════════════════════
 
 def tg(text: str):
-    """Отправка сообщения в Telegram."""
     if not TG_TOKEN or not TG_CHAT:
         return
     try:
@@ -96,7 +88,7 @@ def tg(text: str):
         log.warning(f"Telegram ошибка: {e}")
 
 # ══════════════════════════════════════════════════════════
-#  СОСТОЯНИЕ (сохраняется на диск)
+#  СОСТОЯНИЕ
 # ══════════════════════════════════════════════════════════
 
 def load_state() -> dict:
@@ -104,9 +96,19 @@ def load_state() -> dict:
         with open(STATE_FILE) as f:
             fcntl.flock(f, fcntl.LOCK_SH)
             try:
-                return json.load(f)
+                data = json.load(f)
+                # Миграция: старый формат position → positions
+                if "position" in data and "positions" not in data:
+                    old = data.pop("position")
+                    data["positions"] = [old] if old else []
+                return data
+            except Exception:
+                return _default_state()
             finally:
                 fcntl.flock(f, fcntl.LOCK_UN)
+    return _default_state()
+
+def _default_state() -> dict:
     return {
         "date":          datetime.utcnow().strftime("%Y-%m-%d"),
         "balance":       INITIAL_BALANCE,
@@ -119,7 +121,9 @@ def load_state() -> dict:
         "best_trade":    0.0,
         "worst_trade":   0.0,
         "trade_log":     [],
-        "position":      None,
+        "positions":     [],   # список открытых позиций
+        "last_log":      0,
+        "last_price_save": 0,
     }
 
 def save_state(state: dict):
@@ -133,7 +137,6 @@ def save_state(state: dict):
 def reset_if_new_day(state: dict) -> dict:
     today = datetime.utcnow().strftime("%Y-%m-%d")
     if state["date"] != today:
-        # Итог дня в Telegram
         pnl = state["balance"] - state["day_start_bal"]
         tg(
             f"📅 <b>Итог дня {state['date']}</b>\n"
@@ -151,14 +154,10 @@ def reset_if_new_day(state: dict) -> dict:
     return state
 
 # ══════════════════════════════════════════════════════════
-#  BYBIT (только чтение цен)
+#  BYBIT
 # ══════════════════════════════════════════════════════════
 
-session = HTTP(
-    testnet=False,
-    api_key=BYBIT_KEY,
-    api_secret=BYBIT_SECRET,
-)
+session = HTTP(testnet=False, api_key=BYBIT_KEY, api_secret=BYBIT_SECRET)
 
 def retry(fn, retries=3):
     for i in range(retries):
@@ -191,13 +190,6 @@ def get_klines(symbol: str, limit=400) -> pd.DataFrame:
         df[c] = df[c].astype(float)
     return df.reset_index(drop=True)
 
-def get_tickers() -> dict:
-    r = retry(lambda: session.get_tickers(category="spot"))
-    if not r or "result" not in r or "list" not in r.get("result", {}):
-        log.warning("get_tickers вернул пустой/ошибочный ответ")
-        return {}
-    return {t["symbol"]: t for t in r["result"]["list"] if t["symbol"] in PAIRS}
-
 # ══════════════════════════════════════════════════════════
 #  ИНДИКАТОРЫ И СИГНАЛЫ
 # ══════════════════════════════════════════════════════════
@@ -212,72 +204,74 @@ def indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def buy_signal(df: pd.DataFrame) -> bool:
-    if len(df) < 40:  # минимум для осмысленных индикаторов
+    if len(df) < 40:
         return False
-
-    for i in range(1, 6):  # проверяем кросс на последних 5 свечах
+    for i in range(1, 6):
         c = df.iloc[-i]
         p = df.iloc[-i - 1]
-
         if pd.isna(c.ema9) or pd.isna(c.ema21) or pd.isna(c.rsi) or pd.isna(c.adx) or pd.isna(c.vol_avg):
             continue
-
         cross = p.ema9 < p.ema21 and c.ema9 > c.ema21
         if cross and 35 < c.rsi < 70 and c.adx > 18 and c.volume > c.vol_avg * 1.12:
             return True
-
     return False
 
 # ══════════════════════════════════════════════════════════
-#  СКАНЕР
+#  СКАНЕР — все пары, пропускаем уже открытые
 # ══════════════════════════════════════════════════════════
 
-def select_pair() -> str:
-    """Сканирует ВСЕ пары и возвращает первую с сигналом BUY."""
+def scan_signals(open_symbols: set) -> list:
+    """Возвращает список пар с сигналом BUY (исключая уже открытые)."""
+    signals = []
     log.info("🔍 Сканирую рынок...")
     for sym in PAIRS:
+        if sym in open_symbols:
+            continue  # уже держим эту пару
         try:
             df = indicators(get_klines(sym))
             if df.empty or len(df) < 40:
-                log.debug(f"{sym}: пустой или короткий df, пропускаем")
                 continue
             if buy_signal(df):
-                log.info(f"✅ СИГНАЛ НАЙДЕН: {sym}")
-                return sym
-            time.sleep(0.08)
+                signals.append(sym)
+                log.info(f"✅ СИГНАЛ: {sym}")
+            time.sleep(0.05)
         except Exception as e:
             log.debug(f"{sym}: {e}")
-    log.info("Сигналов нет на всех парах")
-    return None
+    log.info(f"Найдено сигналов: {len(signals)}")
+    return signals
 
 # ══════════════════════════════════════════════════════════
 #  ВИРТУАЛЬНАЯ ТОРГОВЛЯ
 # ══════════════════════════════════════════════════════════
 
 def round_qty(qty: float, price: float) -> float:
-    """Округляем qty под реальные минимумы биржи."""
-    if price > 1000:   return round(qty, 5)
-    if price > 10:     return round(qty, 3)
-    if price > 1:      return round(qty, 2)
-    if price > 0.01:   return round(qty, 2)   # было 0 → стало 2
-    return round(qty, 0)  # для PEPE/SHIB/BONK — целое число монет
+    if price > 1000: return round(qty, 5)
+    if price > 10:   return round(qty, 3)
+    if price > 1:    return round(qty, 2)
+    if price > 0.01: return round(qty, 2)
+    return round(qty, 0)
 
 def smart_round_price(val: float) -> float:
-    """Правильное округление цены для любых монет включая PEPE/SHIB."""
     if val == 0:
         return 0.0
-    # Определяем сколько значимых знаков нужно
     magnitude = math.floor(math.log10(abs(val)))
     decimal_places = max(2, -magnitude + 5)
     return round(val, decimal_places)
 
-def open_virtual_position(state: dict, symbol: str, price: float) -> dict:
-    usdt  = state["balance"] * RISK_PCT
-    qty   = round_qty(usdt / price, price)
+def open_position(state: dict, symbol: str, price: float) -> dict:
+    usdt = state["balance"] * RISK_PCT
+    if usdt < 5:
+        log.warning(f"Объём ${usdt:.2f} < $5, пропускаем")
+        return state
+    qty = round_qty(usdt / price, price)
+    if qty <= 0:
+        log.warning(f"qty = 0 для {symbol}, пропускаем")
+        return state
+
     tp = smart_round_price(price * (1 + TP_PCT))
     sl = smart_round_price(price * (1 - SL_PCT))
 
-    position = {
+    pos = {
         "symbol":        symbol,
         "entry":         price,
         "qty":           qty,
@@ -290,99 +284,101 @@ def open_virtual_position(state: dict, symbol: str, price: float) -> dict:
         "opened_at":     datetime.utcnow().isoformat(),
     }
 
-    if usdt < 5:
-        log.warning(f"Объём ${usdt:.2f} меньше минимума $5, пропускаем")
-        return state
-
-    if qty <= 0:
-        log.warning(f"qty = 0 для {symbol} @ {price}, пропускаем")
-        tg(f"⚠️ Пропущена сделка {symbol}: qty = 0 при цене {price}")
-        return state
-
-    state["position"] = position
+    state["positions"].append(pos)
     save_state(state)
 
     msg = (
-        f"📈 <b>ВИРТУАЛЬНАЯ ПОКУПКА</b>\n"
-        f"Пара: {symbol}\n"
-        f"Цена входа: {price}\n"
-        f"Объём: ${usdt:.2f}\n"
-        f"TP: {tp} (+2.5%)\n"
-        f"SL: {sl} (-1.5%)\n"
-        f"Баланс: ${state['balance']:.2f}"
-    )
-    log.info(msg.replace("\n", " | ").replace("<b>","").replace("</b>",""))
-    tg(msg)
-    return state
-
-def check_position(state: dict, last_loss_time: float) -> tuple[dict, float]:
-    """Проверяет нужно ли закрыть позицию."""
-    pos = state.get("position")
-    if not pos:
-        return state, last_loss_time
-
-    price = get_price(pos["symbol"])
-    state["position"]["current_price"] = price
-    state["position"]["unreal_pnl"] = round((price - pos["entry"]) * pos["qty"], 4)
-    tp_hit = price >= pos["tp"]
-    sl_hit = price <= pos["sl"]
-    # Сохраняем цену только если позиция не закрывается в этом цикле
-    if not tp_hit and not sl_hit:
-        now = time.time()
-        tp_dist = (pos["tp"] - price) / price * 100
-        sl_dist = (price - pos["sl"]) / price * 100
-        # Лог не чаще раза в 5 минут
-        if now - state.get("last_log", 0) > 300:
-            state["last_log"] = now
-            log.info(f"📌 [{pos['symbol']}] Держим @ {price:.8g} | TP: {tp_dist:.2f}% | SL: {sl_dist:.2f}%")
-        # Сохраняем цену раз в 60 сек
-        if now - state.get("last_price_save", 0) > 60:
-            state["last_price_save"] = now
-            save_state(state)
-        return state, last_loss_time
-
-    # Закрываем
-    exit_price = pos["tp"] if tp_hit else pos["sl"]
-    pnl_gross  = (exit_price - pos["entry"]) * pos["qty"]
-    commission = pos["usdt"] * 0.002  # 0.1% вход + 0.1% выход = 0.2% round-trip
-    pnl_net    = round(pnl_gross - commission, 4)
-    win        = pnl_net > 0
-
-    state["balance"]     = round(state["balance"] + pnl_net, 2)
-    state["total_pnl"]   = round(state["total_pnl"] + pnl_net, 4)
-    state["trades"]     += 1
-    state["wins"]       += 1 if win else 0
-    state["losses"]     += 0 if win else 1
-    state["best_trade"]  = max(state["best_trade"], pnl_net)
-    state["worst_trade"] = min(state["worst_trade"], pnl_net)
-    state["trade_log"].append({
-        "time":   datetime.utcnow().isoformat(),
-        "symbol": pos["symbol"],
-        "entry":  pos["entry"],
-        "exit":   exit_price,
-        "qty":    pos["qty"],
-        "pnl":    pnl_net,
-        "result": "WIN" if win else "LOSS",
-    })
-    state["position"] = None
-    state["last_price_save"] = 0  # сброс после закрытия
-    save_state(state)
-
-    if not win:
-        last_loss_time = time.time()
-
-    wr = round(state["wins"] / state["trades"] * 100) if state["trades"] else 0
-    total_pnl_pct = round((state["balance"] - state["start_balance"]) / state["start_balance"] * 100, 2)
-
-    msg = (
-        f"{'🟢' if win else '🔴'} <b>{'WIN' if win else 'LOSS'}</b>  [{pos['symbol']}]\n"
-        f"Вход: {pos['entry']} → Выход: {exit_price}\n"
-        f"PnL: {pnl_net:+.4f}$ (комиссия -{commission:.4f}$)\n"
-        f"Баланс: ${state['balance']:.2f}\n"
-        f"WR: {wr}% | Всего PnL: {state['total_pnl']:+.2f}$ ({total_pnl_pct:+.2f}%)"
+        f"📈 <b>ПОКУПКА</b> {symbol}\n"
+        f"Цена: {price} | Объём: ${usdt:.2f}\n"
+        f"TP: {tp} (+4.5%) | SL: {sl} (-2.5%)\n"
+        f"Баланс: ${state['balance']:.2f} | "
+        f"Позиций: {len(state['positions'])}"
     )
     log.info(msg.replace("\n"," | ").replace("<b>","").replace("</b>",""))
     tg(msg)
+    return state
+
+def check_positions(state: dict, last_loss_time: float) -> tuple[dict, float]:
+    """Проверяет все открытые позиции."""
+    if not state["positions"]:
+        return state, last_loss_time
+
+    now = time.time()
+    to_close = []
+    changed = False
+
+    for i, pos in enumerate(state["positions"]):
+        try:
+            price = get_price(pos["symbol"])
+            state["positions"][i]["current_price"] = price
+            state["positions"][i]["unreal_pnl"] = round((price - pos["entry"]) * pos["qty"], 4)
+            changed = True
+
+            tp_hit = price >= pos["tp"]
+            sl_hit = price <= pos["sl"]
+
+            if tp_hit or sl_hit:
+                to_close.append((i, pos, price, tp_hit))
+            else:
+                if now - state.get("last_log", 0) > 300:
+                    tp_dist = (pos["tp"] - price) / price * 100
+                    sl_dist = (price - pos["sl"]) / price * 100
+                    log.info(f"📌 [{pos['symbol']}] @ {price:.6g} | TP: {tp_dist:.2f}% | SL: {sl_dist:.2f}%")
+
+        except Exception as e:
+            log.warning(f"Ошибка проверки {pos['symbol']}: {e}")
+
+    if now - state.get("last_log", 0) > 300 and state["positions"]:
+        state["last_log"] = now
+
+    # Закрываем позиции (с конца чтобы индексы не сдвигались)
+    for i, pos, price, tp_hit in reversed(to_close):
+        exit_price = pos["tp"] if tp_hit else pos["sl"]
+        pnl_gross  = (exit_price - pos["entry"]) * pos["qty"]
+        commission = pos["usdt"] * 0.002
+        pnl_net    = round(pnl_gross - commission, 4)
+        win        = pnl_net > 0
+
+        state["balance"]     = round(state["balance"] + pnl_net, 2)
+        state["total_pnl"]   = round(state["total_pnl"] + pnl_net, 4)
+        state["trades"]     += 1
+        state["wins"]       += 1 if win else 0
+        state["losses"]     += 0 if win else 1
+        state["best_trade"]  = max(state["best_trade"], pnl_net)
+        state["worst_trade"] = min(state["worst_trade"], pnl_net)
+        state["trade_log"].append({
+            "time":   datetime.utcnow().isoformat(),
+            "symbol": pos["symbol"],
+            "entry":  pos["entry"],
+            "exit":   exit_price,
+            "qty":    pos["qty"],
+            "pnl":    pnl_net,
+            "result": "WIN" if win else "LOSS",
+        })
+        state["positions"].pop(i)
+
+        if not win:
+            last_loss_time = time.time()
+
+        wr = round(state["wins"] / state["trades"] * 100) if state["trades"] else 0
+        total_pct = round((state["balance"] - state["start_balance"]) / state["start_balance"] * 100, 2)
+
+        msg = (
+            f"{'🟢' if win else '🔴'} <b>{'WIN' if win else 'LOSS'}</b> [{pos['symbol']}]\n"
+            f"Вход: {pos['entry']} → Выход: {exit_price}\n"
+            f"PnL: {pnl_net:+.4f}$ (комиссия -{commission:.4f}$)\n"
+            f"Баланс: ${state['balance']:.2f}\n"
+            f"WR: {wr}% | Итого: {state['total_pnl']:+.2f}$ ({total_pct:+.2f}%)"
+        )
+        log.info(msg.replace("\n"," | ").replace("<b>","").replace("</b>",""))
+        tg(msg)
+        changed = True
+
+    # Сохраняем раз в 60 сек если были изменения
+    if changed and now - state.get("last_price_save", 0) > 60:
+        state["last_price_save"] = now
+        save_state(state)
+
     return state, last_loss_time
 
 # ══════════════════════════════════════════════════════════
@@ -395,61 +391,61 @@ def main():
     log.info("=" * 55)
 
     state = load_state()
-    log.info(f"Баланс: ${state['balance']:.2f} | Сделок: {state['trades']}")
+    if "positions" not in state:
+        state["positions"] = []
+
+    log.info(f"Баланс: ${state['balance']:.2f} | Сделок: {state['trades']} | Позиций: {len(state['positions'])}")
 
     tg(
         f"🚀 <b>Paper Trader запущен</b>\n"
-        f"Виртуальный баланс: ${state['balance']:.2f}\n"
+        f"Баланс: ${state['balance']:.2f}\n"
         f"Стратегия: EMA 9/21 + RSI + ADX\n"
-        f"Пары: топ-50 Bybit спот\n"
-        f"TP: +2.5% | SL: -1.5% | Риск: 3%/сделка"
+        f"TP: +4.5% | SL: -2.5% | Риск: 3%/сделка\n"
+        f"Макс. позиций одновременно: {MAX_POSITIONS}"
     )
 
     last_loss_time = 0.0
-    # Если позиция была открыта до перезапуска — сохранить цену сразу
-    state["last_price_save"] = 0 if not state.get("position") else time.time() - 70
+    state["last_price_save"] = 0
 
     while True:
         try:
-            # Новый день
             state = reset_if_new_day(state)
 
             # Дневной стоп
             day_pnl_pct = (state["balance"] - state["day_start_bal"]) / state["day_start_bal"]
             if day_pnl_pct <= -DAILY_STOP:
                 log.warning(f"🛑 Дневной стоп: {day_pnl_pct*100:.1f}%")
-                tg(f"🛑 <b>Дневной стоп</b>: потеря {day_pnl_pct*100:.1f}% за день. Ждём завтра.")
+                tg(f"🛑 <b>Дневной стоп</b>: -{day_pnl_pct*100:.1f}% за день. Ждём завтра.")
                 time.sleep(3600)
                 continue
 
             # Лимит сделок
             if state["trades"] >= MAX_TRADES_DAY:
-                log.info("Лимит сделок на сегодня. Ждём завтра.")
+                log.info("Лимит сделок на сегодня.")
                 time.sleep(3600)
                 continue
 
-            # Проверяем открытую позицию
-            if state.get("position"):
-                state, last_loss_time = check_position(state, last_loss_time)
-                time.sleep(LOOP_SEC)
-                continue
+            # Проверяем открытые позиции
+            state, last_loss_time = check_positions(state, last_loss_time)
 
-            # Кулдаун
+            # Кулдаун после лосса
             if time.time() - last_loss_time < LOSS_COOLDOWN:
                 left = int(LOSS_COOLDOWN - (time.time() - last_loss_time))
                 log.info(f"⏳ Кулдаун: {left}с")
                 time.sleep(30)
                 continue
 
-            # Ищем сигнал на всех парах
-            symbol = select_pair()
-            if symbol is None:
-                time.sleep(LOOP_SEC)
-                continue
-
-            price = get_price(symbol)
-            log.info(f"✅ СИГНАЛ BUY: {symbol} @ {price}")
-            state = open_virtual_position(state, symbol, price)
+            # Ищем новые сигналы если есть место
+            if len(state["positions"]) < MAX_POSITIONS:
+                open_symbols = {p["symbol"] for p in state["positions"]}
+                signals = scan_signals(open_symbols)
+                for sym in signals:
+                    if len(state["positions"]) >= MAX_POSITIONS:
+                        break
+                    price = get_price(sym)
+                    state = open_position(state, sym, price)
+            else:
+                log.info(f"Максимум позиций открыто ({MAX_POSITIONS}), ждём закрытия")
 
         except KeyboardInterrupt:
             log.info("Бот остановлен.")
@@ -465,13 +461,11 @@ def _print_summary(state: dict):
     total = round((state["balance"] - state["start_balance"]) / state["start_balance"] * 100, 2)
     wr    = round(state["wins"] / state["trades"] * 100) if state["trades"] else 0
     log.info("─" * 50)
-    log.info(f"Баланс:      ${state['balance']:.2f}")
-    log.info(f"Старт:       ${state['start_balance']:.2f}")
-    log.info(f"Итог:        {state['total_pnl']:+.2f}$ ({total:+.2f}%)")
-    log.info(f"Сделок:      {state['trades']}")
-    log.info(f"Винрейт:     {wr}%")
-    log.info(f"Лучшая:     {state['best_trade']:+.4f}$")
-    log.info(f"Худшая:     {state['worst_trade']:+.4f}$")
+    log.info(f"Баланс:  ${state['balance']:.2f}")
+    log.info(f"Итог:    {state['total_pnl']:+.2f}$ ({total:+.2f}%)")
+    log.info(f"Сделок:  {state['trades']} | WR: {wr}%")
+    log.info(f"Лучшая:  {state['best_trade']:+.4f}$")
+    log.info(f"Худшая:  {state['worst_trade']:+.4f}$")
     log.info("─" * 50)
 
 if __name__ == "__main__":
