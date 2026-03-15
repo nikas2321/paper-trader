@@ -117,11 +117,12 @@ function render(d){
   const wins=d.wins||0;
   const wr=trades?Math.round(wins/trades*100):0;
   const log=d.trade_log||[];
-  const pos=d.position;
+  const positions=d.positions||[];
 
   let html='';
 
   // Stats cards
+  const totalUnreal = positions.reduce((s,p)=>s+(p.unreal_pnl||0),0);
   html+=`<div class="grid">
     <div class="card">
       <div class="card-label">ВИРТУАЛЬНЫЙ БАЛАНС</div>
@@ -134,7 +135,15 @@ function render(d){
     </div>
     <div class="card">
       <div class="card-label">СДЕЛОК / ЛИМИТ</div>
-      <div class="card-value yellow">${trades} <span style="font-size:13px;color:#2a4a3a">/ 15</span></div>
+      <div class="card-value yellow">${trades} <span style="font-size:13px;color:#2a4a3a">/ 20</span></div>
+    </div>
+    <div class="card">
+      <div class="card-label">ОТКРЫТЫХ ПОЗИЦИЙ</div>
+      <div class="card-value yellow">${positions.length} <span style="font-size:13px;color:#2a4a3a">/ 5</span></div>
+    </div>
+    <div class="card">
+      <div class="card-label">НЕРЕАЛИЗ. PnL</div>
+      <div class="card-value ${totalUnreal>=0?'green':'red'}">${totalUnreal>=0?'+':''}${totalUnreal.toFixed(2)}$</div>
     </div>
     <div class="card">
       <div class="card-label">ВИНРЕЙТ</div>
@@ -153,26 +162,23 @@ function render(d){
     </div>
   </div>`;
 
-  // Active position
-  if(pos){
-    const curPrice = pos.current_price || d.current_price || pos.entry;
+  // Active positions
+  positions.forEach(pos => {
+    const curPrice = pos.current_price || pos.entry;
     const direction = pos.direction || "LONG";
     let priceDiff = curPrice - pos.entry;
     if(direction === "SHORT") priceDiff = -priceDiff;
-
     const unrealGross = priceDiff * pos.qty;
-    const commissionEst = ((pos.usdt||0) + unrealGross) * 0.001;  // только выход
+    const commissionEst = ((pos.usdt||0) + unrealGross) * 0.001;
     const unrealNet = unrealGross - commissionEst;
     const unrealPct = (priceDiff / pos.entry * 100).toFixed(2);
     const unrealColor = unrealNet >= 0 ? '#00ff88' : '#ff3355';
-
     const toTp = direction === "LONG"
       ? ((pos.tp - curPrice) / curPrice * 100).toFixed(1)
       : ((curPrice - pos.tp) / curPrice * 100).toFixed(1);
     const toSl = direction === "LONG"
       ? ((curPrice - pos.sl) / curPrice * 100).toFixed(1)
       : ((pos.sl - curPrice) / curPrice * 100).toFixed(1);
-
     html+=`<div class="pos-card">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <div><span class="dot" style="background:#00ff88"></span><span style="color:#c0f0d0;font-weight:700;font-size:13px">${pos.symbol} (${direction})</span></div>
@@ -190,17 +196,16 @@ function render(d){
       </div>
       <div style="font-size:8px;color:#2a4a3a;margin-top:4px">
         Открыта: ${pos.opened_at?.slice(0,19).replace('T',' ')||'–'} | Объём: $${(pos.usdt||0).toFixed(0)}
-        <br>Цена обновлена: ${new Date().toLocaleTimeString('ru')}
       </div>
     </div>`;
-  }
+  });
 
   // PnL chart
   if(log.length>1){
     let running=start;
     const points=[start,...log.map(t=>{running+=t.pnl;return running;})].slice(-20);
     // Всегда добавляем текущий баланс с учётом открытой позиции
-    const currentBal = bal + (d.position?.unreal_pnl || 0);
+    const currentBal = bal + totalUnreal;
     points.push(currentBal);
     const minV=Math.min(...points), maxV=Math.max(...points)||start+1;
     html+=`<div class="section"><div class="section-title">ДИНАМИКА БАЛАНСА</div>
