@@ -26,30 +26,36 @@ load_dotenv()
 # ══════════════════════════════════════════════════════════
 
 PAIRS = [
-    "BTCUSDT","ETHUSDT","BNBUSDT","XRPUSDT","ADAUSDT",
-    "AVAXUSDT","LTCUSDT","BCHUSDT","DOTUSDT","LINKUSDT",
-    "SOLUSDT","TONUSDT","SUIUSDT","APTUSDT","ARBUSDT",
-    "OPUSDT","NEARUSDT","ATOMUSDT","ICPUSDT","XLMUSDT",
-    "UNIUSDT","AAVEUSDT","MKRUSDT","CRVUSDT","LDOUSDT",
-    "INJUSDT","STXUSDT","FILUSDT","ALGOUSDT","VETUSDT",
-    "RENDERUSDT","FETUSDT","TAOUSDT","HBARUSDT","TRXUSDT",
-    "ETCUSDT","XMRUSDT","QNTUSDT","ZROUSDT","ENAUSDT",
+    # Топ — самые ликвидные, меньше шума
+    "BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT",
+    "AVAXUSDT","LINKUSDT","DOTUSDT","ADAUSDT","LTCUSDT",
+    # Средние — хорошая волатильность
+    "ATOMUSDT","NEARUSDT","UNIUSDT","AAVEUSDT","ARBUSDT",
+    "INJUSDT","SUIUSDT","APTUSDT","TONUSDT","BCHUSDT",
+    # Остальные
+    "OPUSDT","MKRUSDT","CRVUSDT","FILUSDT","ALGOUSDT",
+    "RENDERUSDT","FETUSDT","HBARUSDT","TRXUSDT","ETCUSDT",
+    "XLMUSDT","VETUSDT","STXUSDT","QNTUSDT","ZROUSDT",
+    "LDOUSDT","TAOUSDT","ICPUSDT","XMRUSDT","ENAUSDT",
 ]
 
 INITIAL_BALANCE = 2000.0
 RISK_PCT        = 0.03     # 3% на сделку
-TP_PCT          = 0.045    # +4.5%
-SL_PCT          = 0.025    # -2.5%
+TP_PCT          = 0.03     # +3% (чаще достигается)
+SL_PCT          = 0.015    # -1.5% (меньше потери)
 COMMISSION      = 0.001    # 0.1% за сторону
 DAILY_STOP      = 0.05     # -5% дневной стоп
+DAILY_PROFIT    = 0.0015   # +0.15% (~$3) дневная цель
+TRADE_HOURS     = (8, 22)   # торгуем только 8:00-22:00 UTC
 MAX_TRADES_DAY  = 20       # максимум сделок в день
 MAX_POSITIONS   = 5        # максимум одновременных позиций
 LOSS_COOLDOWN   = 120      # сек после убытка
+MAX_CONSEC_LOSS = 3         # стоп после N лоссов подряд
 LOOP_SEC        = 30
 
 # Трейлинг стоп — защита прибыли
-TRAIL_ACTIVATE  = 0.02     # активируется когда прибыль >= +2%
-TRAIL_LOCK      = 0.01     # фиксирует минимум +1% прибыли
+TRAIL_ACTIVATE  = 0.01     # активируется когда прибыль >= +1%
+TRAIL_LOCK      = 0.005    # фиксирует минимум +0.5% прибыли
 
 STATE_FILE = "paper_state.json"
 
@@ -126,6 +132,7 @@ def _default_state() -> dict:
         "worst_trade":   0.0,
         "trade_log":     [],
         "positions":     [],   # список открытых позиций
+        "consec_losses": 0,    # последовательных лоссов подряд
         "last_log":      0,
         "last_price_save": 0,
     }
@@ -154,6 +161,7 @@ def reset_if_new_day(state: dict) -> dict:
         state["wins"]          = 0
         state["losses"]        = 0
         state["day_start_bal"] = state["balance"]
+        state["goal_reached"] = False
         save_state(state)
     return state
 
@@ -181,9 +189,9 @@ def get_price(symbol: str) -> float:
         raise ValueError(f"Пустой список цен для {symbol}")
     return float(lst[0]["lastPrice"])
 
-def get_klines(symbol: str, limit=400) -> pd.DataFrame:
+def get_klines(symbol: str, limit=400, interval="1") -> pd.DataFrame:
     r = retry(lambda: session.get_kline(
-        category="spot", symbol=symbol, interval="1", limit=limit
+        category="spot", symbol=symbol, interval=interval, limit=limit
     ))
     if r is None:
         raise ValueError(f"Не удалось получить свечи для {symbol}")
@@ -193,6 +201,16 @@ def get_klines(symbol: str, limit=400) -> pd.DataFrame:
     for c in ["open","high","low","close","volume"]:
         df[c] = df[c].astype(float)
     return df.reset_index(drop=True)
+
+def is_uptrend(symbol: str) -> bool:
+    """Проверяет общий тренд на 15m — торгуем только в восходящем тренде."""
+    try:
+        df = get_klines(symbol, limit=60, interval="15")
+        ema50 = df["close"].ewm(span=50).mean()
+        # Цена выше EMA50 на 15m = восходящий тренд
+        return df["close"].iloc[-1] > ema50.iloc[-1]
+    except Exception:
+        return True  # если ошибка — не блокируем
 
 # ══════════════════════════════════════════════════════════
 #  ИНДИКАТОРЫ И СИГНАЛЫ
@@ -207,16 +225,23 @@ def indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["vol_avg"] = df["volume"].rolling(20).mean()
     return df
 
-def buy_signal(df: pd.DataFrame) -> bool:
+def buy_signal(df: pd.DataFrame, strict: bool = False) -> bool:
     if len(df) < 40:
         return False
+    # Обычный режим: ADX>25, RSI 40-65, Vol>1.5x
+    # Строгий режим (WR<50%): ADX>30, RSI 45-60, Vol>2.0x
+    rsi_min  = 45  if strict else 40
+    rsi_max  = 60  if strict else 65
+    adx_min  = 30  if strict else 25
+    vol_mult = 2.0 if strict else 1.5
+
     for i in range(1, 6):
         c = df.iloc[-i]
         p = df.iloc[-i - 1]
         if pd.isna(c.ema9) or pd.isna(c.ema21) or pd.isna(c.rsi) or pd.isna(c.adx) or pd.isna(c.vol_avg):
             continue
         cross = p.ema9 < p.ema21 and c.ema9 > c.ema21
-        if cross and 35 < c.rsi < 70 and c.adx > 18 and c.volume > c.vol_avg * 1.12:
+        if cross and rsi_min < c.rsi < rsi_max and c.adx > adx_min and c.volume > c.vol_avg * vol_mult:
             return True
     return False
 
@@ -224,20 +249,33 @@ def buy_signal(df: pd.DataFrame) -> bool:
 #  СКАНЕР — все пары, пропускаем уже открытые
 # ══════════════════════════════════════════════════════════
 
-def scan_signals(open_symbols: set) -> list:
+def scan_signals(open_symbols: set, state: dict) -> list:
     """Возвращает список пар с сигналом BUY (исключая уже открытые)."""
     signals = []
+    trades = state.get("trades", 0)
+    wins   = state.get("wins", 0)
+    wr     = round(wins / trades * 100) if trades >= 3 else 100
+
+    # Если WR < 50% — ужесточаем фильтры дополнительно
+    strict = wr < 50 and trades >= 3
+    if strict:
+        log.info(f"⚠️ WR={wr}% < 50% — включён строгий режим фильтров")
+
     log.info("🔍 Сканирую рынок...")
     for sym in PAIRS:
         if sym in open_symbols:
-            continue  # уже держим эту пару
+            continue
         try:
             df = indicators(get_klines(sym))
             if df.empty or len(df) < 40:
                 continue
-            if buy_signal(df):
+            if buy_signal(df, strict=strict):
+                # Фильтр тренда на 15m
+                if not is_uptrend(sym):
+                    log.debug(f"{sym}: сигнал есть но тренд нисходящий, пропускаем")
+                    continue
                 signals.append(sym)
-                log.info(f"✅ СИГНАЛ: {sym}")
+                log.info(f"✅ СИГНАЛ: {sym} (strict={strict})")
             time.sleep(0.05)
         except Exception as e:
             log.debug(f"{sym}: {e}")
@@ -375,6 +413,9 @@ def check_positions(state: dict, last_loss_time: float) -> tuple[dict, float]:
 
         if not win:
             last_loss_time = time.time()
+            state["consec_losses"] = state.get("consec_losses", 0) + 1
+        else:
+            state["consec_losses"] = 0
 
         wr = round(state["wins"] / state["trades"] * 100) if state["trades"] else 0
         total_pct = round((state["balance"] - state["start_balance"]) / state["start_balance"] * 100, 2)
@@ -427,13 +468,20 @@ def main():
         try:
             state = reset_if_new_day(state)
 
-            # Дневной стоп
+            # Дневной стоп по убытку
             day_pnl_pct = (state["balance"] - state["day_start_bal"]) / state["day_start_bal"]
             if day_pnl_pct <= -DAILY_STOP:
                 log.warning(f"🛑 Дневной стоп: {day_pnl_pct*100:.1f}%")
-                tg(f"🛑 <b>Дневной стоп</b>: -{day_pnl_pct*100:.1f}% за день. Ждём завтра.")
+                tg(f"🛑 <b>Дневной стоп (убыток)</b>: -{abs(day_pnl_pct)*100:.1f}% за день. Ждём завтра.")
                 time.sleep(3600)
                 continue
+
+            # Дневная цель достигнута — ужесточаем фильтры
+            if day_pnl_pct >= DAILY_PROFIT:
+                if not state.get("goal_reached"):
+                    state["goal_reached"] = True
+                    log.info(f"🎯 Дневная цель: +{day_pnl_pct*100:.2f}% — режим защиты прибыли")
+                    tg(f"🎯 <b>Дневная цель достигнута!</b> +{day_pnl_pct*100:.2f}%\nВключён режим защиты — только сильные сигналы")
 
             # Лимит сделок
             if state["trades"] >= MAX_TRADES_DAY:
@@ -443,6 +491,21 @@ def main():
 
             # Проверяем открытые позиции
             state, last_loss_time = check_positions(state, last_loss_time)
+
+            # Фильтр времени — только 8:00-22:00 UTC
+            hour = datetime.utcnow().hour
+            if not (TRADE_HOURS[0] <= hour < TRADE_HOURS[1]):
+                log.info(f"🕐 Нерабочее время ({hour:02d}:xx UTC) — ждём 8:00")
+                time.sleep(600)
+                continue
+
+            # Стоп после N лоссов подряд
+            if state.get("consec_losses", 0) >= MAX_CONSEC_LOSS:
+                log.warning(f"🛑 {MAX_CONSEC_LOSS} лосса подряд — пауза 2 часа")
+                tg(f"🛑 <b>{MAX_CONSEC_LOSS} лосса подряд</b> — пауза 2 часа для защиты баланса")
+                time.sleep(7200)
+                state["consec_losses"] = 0
+                continue
 
             # Кулдаун после лосса
             if time.time() - last_loss_time < LOSS_COOLDOWN:
@@ -454,7 +517,7 @@ def main():
             # Ищем новые сигналы если есть место
             if len(state["positions"]) < MAX_POSITIONS:
                 open_symbols = {p["symbol"] for p in state["positions"]}
-                signals = scan_signals(open_symbols)
+                signals = scan_signals(open_symbols, state)
                 for sym in signals:
                     if len(state["positions"]) >= MAX_POSITIONS:
                         break
